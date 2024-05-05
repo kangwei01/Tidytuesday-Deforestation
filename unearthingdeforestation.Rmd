@@ -1,0 +1,286 @@
+---
+title: "Unearthing Deforestation"
+author: "DSA2101 Project"
+date: "`r Sys.Date()`"
+output: html_document
+---
+# 1 Introduction
+Deforestation has become a pressing global environmental issue with far-reaching consequences. While deforestation has occurred throughout history, the scale and pace of modern-day deforestation have reached alarming levels, primarily due to the demands of a growing population, expanding economies, and unsustainable land use practices. In order for humanity to take corrective action to reverse our damage done on the globe, it is imperative that we identify the causes driving deforestation. As such, this project uses the Deforestation data set from [TidyTuesday](https://github.com/rfordatascience/tidytuesday/blob/master/data/2021/2021-04-06/readme.md) to answer the question: **What were the major drivers for countries that experienced the most deforestation from 2000 to 2010?**
+
+To address our question, we will mainly be using data from `forest.csv`, `soybean_use.csv` and `vegetable_oil.csv` files to plot choropleth maps, scatterplots and barplots to discover insights that may be useful in answering our question. These files contain crucial data for more than a hundred countries on net forest area change over the years, as well as breakdowns of soybean use and vegetable oil production.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# 2 Load Libraries and Data Files
+```{r, warning = FALSE, message = FALSE}
+library(tidyverse)
+library(ggthemes)
+library(fuzzyjoin)
+library(RColorBrewer)
+library(maps)
+library(ggrepel)
+
+
+forest <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2021/2021-04-06/forest.csv')
+forest_area <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2021/2021-04-06/forest_area.csv')
+brazil_loss <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2021/2021-04-06/brazil_loss.csv')
+soybean_use <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2021/2021-04-06/soybean_use.csv')
+vegetable_oil <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2021/2021-04-06/vegetable_oil.csv')
+```
+
+
+# 3 Choropleth Map
+## Which countries experienced the most deforestation from 2000-2010?
+We use a choropleth world map to visualise countries that experienced the greatest net loss in forests from 2000-2010, mapped onto a diverging color scale with 0 being the neutral midpoint and with darker shades of red representing more heavily deforested countries.
+
+## 3.1 Data Cleaning
+To prepare the `forest.csv` data for this visualisation, we first filter for 2010 data and remove World entity, under the assumption that 2010 values represent the change in forest area from the previous recorded year, 2000. We then filter for top 10 most deforested countries (by net negative forest conversion). We see that these countries are Brazil, Paraguay, Tanzania, Myanmar, Argentina, Bolivia, Mozambique, Zambia, Peru, Venezuela. We will be exploring these countries further for the rest of our analysis. We then prepare data frames for mapping net forest conversion onto the world map and for labeling the top 10 most deforested countries on the map.
+
+```{r}
+# Disable scientific notation
+options(scipen = 999)
+
+# Filter forest dataset for 2010 only, remove World entity, join with iso3166
+forest_change_2010 <- forest %>% 
+  filter(entity != "World", year == 2010) %>%
+  inner_join(maps::iso3166, by = c("code" = "a3"))
+
+# Inspect the top 10 most deforested countries from 2000-2010
+top10_forest_change <- forest_change_2010 %>%
+  slice_min(net_forest_conversion, n = 10) %>%
+  select(entity, code, net_forest_conversion)
+top10_countries = top10_forest_change$entity
+top10_forest_change
+
+# Data frame for 
+world <- map_data("world") %>%
+  as_tibble() %>%
+  filter(region != "Antarctica") %>%
+  regex_left_join(forest_change_2010, by = c("region" = "mapname"))
+# Data frame for labeling top 10 countries
+top10_labels <- world %>%
+  group_by(entity) %>%
+  summarise(long = mean(long), lat = mean(lat)) %>%
+  filter(entity %in% top10_countries) %>%
+  ungroup()
+```
+## 3.2 Visualisation
+```{r}
+ggplot(data = world) +
+  geom_polygon(aes(long, lat, group = group, fill = net_forest_conversion), color = "black", linewidth = 0.1) +
+  scale_fill_gradient2(low = "darkred", mid = "ivory", high = "darkgreen", midpoint = 0, na.value = "grey", name = "Change in forest area (ha), 2000-2010") +
+  geom_label_repel(data = top10_labels, aes(x = long, y = lat, label = entity), box.padding = 0.02, point.padding = 0.1, segment.size = 0.05, size = 2, force = 5) +
+  theme_map() +
+  theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), legend.key.size = unit(0.4, "cm"), legend.title = element_text(size = 6), legend.text = element_text(size = 6), plot.title = element_text(hjust = 0.5)) + labs(title = "Choropleth World Map of Change in Forest Area, 2000-2010")
+```
+
+## 3.3 Discussion
+The choropleth map makes it strikingly apparent that Brazil experienced the most significant loss of forests with the darkest shade of red compared to the rest of the world, even much darker than the second most deforested country - Paraguay.
+
+
+# 4 Scatterplot
+## Is there a correlation between soybean use/vegetable oil production and net forest loss? Did these factors have an effect on deforestation in these countries?
+We plot scatterplots of Increase in Total Soybean Use (Increase in Total Veg Oil Production) vs Net Forest Loss to investigate the relationship between increased soybean usage (increased vegetable oil production) and deforestation from 2000 to 2010 for each country. 
+
+## 4.1 Data Cleaning
+However, the `net_forest_conversion` in Brazil was several magnitudes larger than the rest of the data set, which led to clustering of points for the other countries. To enhance the intepretability of the plot, we took a log transformation on net_forest_conversion to stabilise the spread of the data, leading to a better visualisation.
+
+Since the amount of missing values in the soybean_use and vegetable_oil data for these countries were too large to ignore (may skew the data and lead to inaccurate conclusions), we filled in missing values in each column with the mean of the remaining countries for that year.
+
+```{r}
+# Prepare the soybean data
+top10_soybean_imputed <- soybean_use %>%
+  # Keep only data from 2000-2010 from top 10 countries
+  filter(year %in% c(2000, 2010), entity %in% top10_countries) %>%
+  group_by(year) %>%
+  # Fill in NA values with the mean of that column for that respective year
+  mutate(human_food = ifelse(is.na(human_food), mean(human_food, na.rm = TRUE), human_food),
+         animal_feed = ifelse(is.na(animal_feed), mean(animal_feed, na.rm = TRUE), animal_feed),
+         processed = ifelse(is.na(processed), mean(processed, na.rm = TRUE), processed)) %>%
+  ungroup() 
+
+top10_soybean_change <- top10_soybean_imputed %>%
+  # Get the total soybean usage for each country in 2000 and 2010
+  group_by(entity, year) %>%
+  summarise(total = human_food + animal_feed + processed, .groups = "drop") %>%
+  pivot_wider(names_from = year, values_from = total) %>%
+  # Get the increase in soybean usage from 2000-2010 for each country by calculating their difference
+  mutate(soybean_change = `2010` - `2000`) %>%
+  select(entity, soybean_change)
+
+# Repeat same steps on veg oil production data
+top10_vegoil_imputed <- vegetable_oil %>%
+  filter(year %in% c(2000, 2010), entity %in% top10_countries) %>%
+  pivot_wider(names_from = crop_oil, values_from = production) %>%
+  group_by(year) %>%
+  mutate(Soybean = ifelse(is.na(Soybean), mean(Soybean, na.rm = TRUE), Soybean),
+         Sesame = ifelse(is.na(Sesame), mean(Sesame, na.rm = TRUE), Sesame),
+         Linseed = ifelse(is.na(Linseed), mean(Linseed, na.rm = TRUE), Linseed), 
+         Palm = ifelse(is.na(Palm), mean(Palm, na.rm = TRUE), Palm), 
+         Rapeseed = ifelse(is.na(Rapeseed), mean(Rapeseed, na.rm = TRUE), Rapeseed), 
+         Groundnut = ifelse(is.na(Groundnut), mean(Groundnut, na.rm = TRUE), Groundnut), 
+         Cottonseed = ifelse(is.na(Cottonseed), mean(Cottonseed, na.rm = TRUE), Cottonseed), 
+         `Coconut (copra)` = ifelse(is.na(`Coconut (copra)`), mean(`Coconut (copra)`, na.rm = TRUE), `Coconut (copra)`), 
+         `Olive, virgin` = ifelse(is.na(`Olive, virgin`), mean(`Olive, virgin`, na.rm = TRUE), `Olive, virgin`), 
+         Safflower = ifelse(is.na(Safflower), mean(Safflower, na.rm = TRUE), Safflower), 
+         Sunflower = ifelse(is.na(Sunflower), mean(Sunflower, na.rm = TRUE), Sunflower), 
+         Maize = ifelse(is.na(Maize), mean(Maize, na.rm = TRUE), Maize), 
+         `Palm kernel` = ifelse(is.na(`Palm kernel`), mean(`Palm kernel`, na.rm = TRUE), `Palm kernel`),) %>%
+  ungroup() 
+
+top10_vegoil_change <- top10_vegoil_imputed%>%
+  group_by(entity, year) %>%
+  summarise(total = Soybean + Sesame + Linseed + Palm + Rapeseed + Groundnut + Cottonseed + `Coconut (copra)` + `Olive, virgin` + Safflower + Sunflower + Maize + `Palm kernel`, .groups = "drop") %>%
+  pivot_wider(names_from = year, values_from = total) %>%
+  mutate(vegoil_change = `2010` - `2000`) %>%
+  select(entity, vegoil_change)
+
+# Join the above data frames with net forest conversion data frame for top 10 countries. This new data frame will be used for ggplot().
+top10_change <- top10_forest_change %>%
+  left_join(top10_soybean_change, by = "entity") %>%
+  left_join(top10_vegoil_change, by = "entity") %>%
+  # Perform log transformation of net_forest_conversion
+  mutate(log_forest_loss = log(abs(net_forest_conversion)), color = ifelse(entity == "Argentina", "red", "black"))
+
+# Remove outlier for plotting best fit line
+top10_change_wo_outlier <- top10_change %>% filter(entity != "Argentina")
+```
+
+## 4.2 Visualisation
+```{r}
+# Plot of Increase in Total Soybean Use vs Log Forest Loss, 2000-2010
+ggplot(data = top10_change, aes(x = soybean_change/1000, y = log_forest_loss)) + 
+  geom_point(aes(color = color)) + 
+  scale_color_identity() + 
+  geom_text(aes(label = entity, color = color), size = 2.2, nudge_x = 0.1, hjust = -0.2) + 
+  xlim(0, 22500) +
+  geom_smooth(data = top10_change_wo_outlier,
+              method = "lm", color = "blue", se = T, linetype = "dashed", linewidth = 0.5) +
+  labs(x = "Increase in Total Soybean Use (thousand tonnes)", y = "Net Forest Loss (log scale)", title = "Increase in Soybean Use vs Net Forest Loss, 2000 - 2010") + 
+  theme_minimal() + 
+  theme(axis.title = element_text(size = 8), plot.title = element_text(size = 10))
+
+# Plot of Increase in Total Veg Oil Production vs Log Forest Loss, 2000-2010
+ggplot(data = top10_change, aes(x = vegoil_change/1000, y = log_forest_loss)) + geom_point(aes(color = color)) + scale_color_identity() +
+  geom_text(aes(label = entity, color = color), size = 2.2, nudge_x = 0.1, hjust = -0.2) + 
+  geom_smooth(data = top10_change_wo_outlier,
+              method = "lm", color = "blue", se = T, linetype = "dashed", linewidth = 0.5) +
+  labs(x = "Increase in Total Veg Oil Production (thousand tonnes)", y = "Net Forest Loss (log scale)", title = "Increase in Veg Oil Production vs Net Forest Loss, 2000 - 2010") + theme_minimal() +
+  theme(axis.title = element_text(size = 8), plot.title = element_text(size = 10))
+```
+
+## 4.3 Discussion
+From the above plots, we see that countries that had greater increases in soybean usage and veg oil production from 2000 to 2010 experienced greater deforestation in the same time period. There seems to be a positive linear correlation between increase in usage of soybean/production of veg oil and log deforested area, with the exception of Argentina, which was an outlier. This supports our theory that deforestation in these countries may have been driven by soybean use and veg oil production. However, we cannot be 100% certain as correlation does not equal causation. Nonetheless, the insights gained from these two plots form the basis for our final visualisation.
+
+
+# 5 Barplot
+## What were the most popular uses for soybean in each country? What were the most produced types of vegetable oil in each country?
+Now that we have discovered a positive correlation between soybean use and vegetable oil production, we are interested in breaking down each into their individual components to find which were the main drivers of soybean use and veg oil production in each country. To achieve this, we plot barplots showing the proportions of each factor in their respective categories, faceted on year and country.
+
+## 5.1 Data Cleaning
+To prepare the final data frame for bar plotting, we first manipulate `top10_soybean_imputed` and `top10_vegoil_imputed` into a tidy format by pivoting longer on the factors. We then combine them into a single data frame and remove unnecessary columns before calculating proportions of each factor as we are interested in the relative contribution of each factor to the total soybean use and veg oil production in 2000 and 2010.  
+```{r}
+# Pivot longer on each factor of soybean use into a single column
+top10_soybean_bar <- top10_soybean_imputed %>%
+  select(-code) %>%
+  mutate(factor = "soybean") %>%
+  pivot_longer(cols = c("human_food", "animal_feed", "processed"), names_to = "soybean", values_to = "soybean_val")
+
+# Rename each factor and repeat the above
+top10_vegoil_bar <- top10_vegoil_imputed %>%
+  select(-code) %>%
+  mutate(factor = "oil") %>%
+  rename(soybean = Soybean,
+         sesame = Sesame,
+         linseed = Linseed,
+         palm = Palm,
+         rapeseed = Rapeseed,
+         groundnut = Groundnut,
+         cottonseed = Cottonseed,
+         coconut = `Coconut (copra)`,
+         olive = `Olive, virgin`,
+         safflower = Safflower,
+         sunflower = Sunflower,
+         maize = Maize,
+         palm_kernel = `Palm kernel`) %>%
+  pivot_longer(cols = c("soybean", "sesame", "linseed", "palm", "rapeseed", "groundnut", "cottonseed", "coconut", "olive", "safflower", "sunflower", "maize", "palm_kernel"), names_to = "oil", values_to = "oil_val") %>%
+  group_by(entity, year) %>%
+  # Show only the top 5 contributing factors in each country for simplicity and interpretability
+  slice_max(oil_val, n = 5)
+
+
+# Combine the above two data frames into a suitable format for bar plotting
+top10_bar <- bind_rows(top10_soybean_bar, top10_vegoil_bar)
+top10_bar <- top10_bar %>%
+  mutate(val = case_when(
+    !is.na(soybean_val) ~ soybean_val,
+    !is.na(oil_val) ~ oil_val
+  )) %>%
+  select(-c("soybean_val", "oil_val")) %>%
+  mutate(level = case_when(
+    !is.na(soybean) ~ soybean,
+    !is.na(oil) ~ oil
+  )) %>%
+  select(-c("soybean", "oil")) %>%
+  group_by(factor, year, entity) %>%
+  mutate(fac_total = sum(val)) %>%
+  ungroup() %>%
+  group_by(entity, year, level) %>%
+  # Calculate proportions of each factor in the two drivers
+  mutate(prop = val / fac_total)
+```
+
+## 5.2 Visualisation
+```{r}
+ggplot(top10_bar, aes(x = factor, y = prop, fill = level)) +
+  geom_col(position = "fill") +
+  facet_grid(rows = vars(year), cols = vars(entity)) +
+  scale_fill_manual(values = c("red", "green", "blue", "yellow", "orange", "purple", "darkgreen", "magenta",
+            "darkgray", "pink", "maroon", "lightyellow", "sienna", "aquamarine2", "navy", "cyan"), labels = c("Animal Feed", "Coconut", "Cottonseed", "Groundnut", "Human Food", "Maize", "Olive", "Palm", "Palm Kernel", "Processed (veg oil, biofuel etc.)", "Rapeseed", "Safflower", "Sesame", "Soybean", "Sunflower", "Linseed")) +
+  labs(x = "Driver of deforestation", y = "Proportion", title = "Breakdown of Soybean Use and Vegetable Oil Production", fill = "Type") +
+  scale_x_discrete(labels = c("Veg Oil Prod (Top 5)", "Soybean Use")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6), axis.text.y = element_text(size = 6), strip.text.x = element_text(size = 4.5), legend.text = element_text(size = 7), legend.key.size = unit(0.8, "lines"), plot.title = element_text(size = 13), axis.title.x = element_text(size = 10), axis.title.y = element_text(size = 10), legend.title = element_text(size = 11))
+```
+
+## 5.3 Discussion
+From the above faceted barplots, we see that in Argentina, Bolivia, Brazil, Mozambique, Paraguay, and Tanzania, the most produced crop oil by far was soybean oil. Incidentally, use of soybean for further processing (vegetable oil, biofuel and processed animal feed) formed the bulk of soybean use in the same countries. This strongly suggests that soybean oil production was a major driver of deforestation in these countries.
+
+In Myanmmar, the most produced vegetable oil in both years was sesame oil while the most popular use for soybean was for animal feed, suggesting that these were major drivers of deforestation in this country.
+
+In Peru, it was cottonseed oil production and soybean for animal feed use, though it is worth noting that the proportion of cottonseed oil production decreased in 2010 compared to 2000, suggesting that cottonseed oil production may not be as significant a driver in future.
+
+In Venezuela and Zambia, it was palm oil production and soybean for animal feed use in 2000. However, in 2010, the proportion of palm oil production decreased in both countries and became less popular than maize oil production (for Venezuela) and sesame oil production (for Zambia). 
+
+
+# 6 Conclusion
+From the questions answered by the above visualisations, we conclude that, from 2000-2010 :
+
+1. The top 10 most deforested countries were Brazil, Paraguay, Tanzania, Myanmar, Argentina, Bolivia, Mozambique, Zambia, Peru, Venezuela.
+
+2. There is a positive correlation between increased soybean use and vegetable oil production with net forest loss in the above countries.
+
+3. Soybean oil production and soybean for animal feed use formed the majority of vegetable oil production and soybean use in most of these countries in 2000 and 2010.
+
+With the above insights derived, we can now answer the question posed in our introduction. **There is strong evidence to suggest that deforestation from 2000 to 2010 in most of these countries was driven primarily by demand for soybean in feeding livestock and producing soybean oil**, perhaps due in part to their substantial agricultural sector.
+
+
+# 7 References
+1. https://github.com/rfordatascience/tidytuesday/blob/master/data/2021/2021-04-06/readme.md
+
+
+# 8 About
+This project was developed for DSA2101 Essential Data Analytics Tools: Data Visualization at the National University of Singapore (NUS). The team is comprised of the following members:
+
+```{r, echo = FALSE}
+students <- data.frame(
+  Name = c("FONG KANG WEI", "A M NOORUL NAGIEB", "XIE ZEBANG"),
+  Year = c("2", "2", "2"),
+  Major = c("Data Science & Analytics", "Data Science & Analytics", "Data Science & Analytics"),
+  Responsibilities = c("Sections 1, 3 and 6 ", "Sections 4 and 6", "Sections 5 and 6")
+)
+
+knitr::kable(students, align = "l")
+```
